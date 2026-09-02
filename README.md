@@ -19,21 +19,21 @@ run more than once.
 Install-Module Microsoft.Graph.Authentication, Microsoft.Graph.Groups, Microsoft.Graph.Teams -Scope CurrentUser
 ```
 
-> All three are required. `Microsoft.Graph.Groups` supplies `Get-MgGroup`, which the script
-> uses to enumerate teams — it is easy to miss because the script's own header only lists
-> the other two.
+All three are required. `Microsoft.Graph.Groups` supplies `Get-MgGroup`, which enumerates
+the teams. The script declares these with `#Requires`, so a missing module stops it
+immediately rather than failing partway through.
 
 **Permissions**
 
 | Mode | What you need |
 |---|---|
 | `Interactive` | Sign in as **Teams Administrator** or **Global Administrator**. The script requests the `TeamSettings.ReadWrite.All` and `Group.Read.All` delegated scopes at sign-in. |
-
-The script checks these permissions immediately after sign-in and stops with a clear
-message if they were not consented, rather than failing with a 403 on every team in turn.
-Holding a stronger scope than the minimum (for example `Group.ReadWrite.All` in place of
-`Group.Read.All`) satisfies the check.
 | `ManagedIdentity` | Grant the managed identity the `TeamSettings.ReadWrite.All` and `Group.Read.All` **application** roles. These must be assigned through Graph — the Azure portal UI cannot assign them. |
+
+The script verifies these immediately after sign-in and stops with a clear message if they
+were not consented, rather than failing with a 403 on every team in turn. Holding a
+stronger scope than the minimum (for example `Group.ReadWrite.All` in place of
+`Group.Read.All`) satisfies the check.
 
 ---
 
@@ -113,6 +113,8 @@ created automatically if it does not exist — with one row per team:
 | `Retryable` | Throttled (429) or a server error (5xx). Not changed; re-run picks it up. |
 | `Error` | Could not be read or written; see `StatusCode` and `Detail` |
 
+The CSV is written in both dry-run and apply modes.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -122,8 +124,6 @@ created automatically if it does not exist — with one row per team:
 
 Archived skips do not cause a non-zero exit — they are expected. `Retryable` results do,
 because that work is genuinely still outstanding.
-
-The CSV is written in both dry-run and apply modes.
 
 ---
 
