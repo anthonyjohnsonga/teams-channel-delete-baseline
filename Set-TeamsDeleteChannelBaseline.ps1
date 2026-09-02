@@ -45,7 +45,13 @@ param(
     [ValidateSet('Interactive', 'ManagedIdentity')]
     [string] $AuthMode = 'Interactive',
 
-    [string] $LogPath = ".\TeamsChannelBaseline_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+    # Reports land in a Reports folder next to the script, not in whatever directory the
+    # caller happened to be sitting in. $PSScriptRoot is empty when there is no script
+    # file on disk - an Azure Automation runbook, or code pasted into a console - so fall
+    # back to the working directory in that case.
+    [string] $LogPath = (Join-Path `
+        (Join-Path $(if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }) 'Reports') `
+        "TeamsChannelBaseline_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv")
 )
 
 $ErrorActionPreference = 'Stop'
@@ -134,6 +140,13 @@ foreach ($team in $teams) {
 # --- Report ------------------------------------------------------------------
 
 Write-Host "`nRemediated: $changed | Already compliant: $already | Errors: $failed" -ForegroundColor Green
+
+# Create the report folder if it does not exist yet. New-Item supports ShouldProcess,
+# so it needs -WhatIf:$false for the same reason Export-Csv does - see below.
+$reportDir = Split-Path -Parent $LogPath
+if ($reportDir -and -not (Test-Path -LiteralPath $reportDir)) {
+    New-Item -ItemType Directory -Path $reportDir -Force -WhatIf:$false | Out-Null
+}
 
 # -WhatIf:$false on the export below. Export-Csv supports ShouldProcess, so it
 # inherits $WhatIfPreference from the script scope and gets suppressed during a

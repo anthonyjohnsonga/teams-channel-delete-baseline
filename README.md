@@ -70,7 +70,7 @@ Uses the host's system-assigned managed identity — no secrets to store or rota
 | Parameter | Default | Description |
 |---|---|---|
 | `-AuthMode` | `Interactive` | `Interactive` or `ManagedIdentity`. |
-| `-LogPath` | `.\TeamsChannelBaseline_<timestamp>.csv` | Where to write the CSV report. |
+| `-LogPath` | `<script folder>\Reports\TeamsChannelBaseline_<timestamp>.csv` | Where to write the CSV report. The parent folder is created if it does not exist. |
 | `-WhatIf` | — | Report only; makes no changes. |
 
 ---
@@ -83,7 +83,8 @@ A summary line on the console:
 Remediated: 12 | Already compliant: 84 | Errors: 2
 ```
 
-And a CSV at `-LogPath` with one row per team:
+And a CSV report saved to a `Reports` folder alongside the script — created automatically
+on first run — with one row per team:
 
 | Column | Description |
 |---|---|
@@ -104,6 +105,9 @@ The CSV is written in both dry-run and apply modes.
   Re-run the script to re-establish the baseline.
 - **Archived teams are expected to fail** and will appear in the CSV as `Error`. This is
   normal and does not require action.
-- **In `ManagedIdentity` mode the CSV is written to the host's working directory.** In an
-  Azure Automation runbook that filesystem is discarded when the job ends — capture the
+- **The `Reports` folder is resolved from the script's own location**, so the report lands
+  in the same place regardless of which directory you run from. Reports are excluded from
+  this repository by `.gitignore` — they contain team display names and object IDs.
+- **In an Azure Automation runbook there is no script file on disk**, so the report falls
+  back to the job's working directory, which is discarded when the job ends. Capture the
   console output, or point `-LogPath` somewhere durable.
