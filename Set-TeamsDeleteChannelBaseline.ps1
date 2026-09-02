@@ -1,3 +1,5 @@
+#Requires -Modules Microsoft.Graph.Authentication, Microsoft.Graph.Groups, Microsoft.Graph.Teams
+
 <#
 .SYNOPSIS
     Disables "Allow members to delete and restore channels" on all Teams in the tenant.
@@ -16,9 +18,12 @@
       ManagedIdentity - unattended execution, e.g. an Azure Automation runbook.
                         No secrets to store or rotate.
 
-.REQUIREMENTS
-    Microsoft.Graph.Authentication and Microsoft.Graph.Teams modules.
-        Install-Module Microsoft.Graph.Authentication, Microsoft.Graph.Teams -Scope CurrentUser
+.NOTES
+    Requirements.
+
+    Three Microsoft Graph modules. Groups is easy to overlook - it supplies Get-MgGroup,
+    which this script uses to enumerate teams.
+        Install-Module Microsoft.Graph.Authentication, Microsoft.Graph.Groups, Microsoft.Graph.Teams -Scope CurrentUser
 
     Interactive mode: sign in as Teams Administrator or Global Administrator.
 
