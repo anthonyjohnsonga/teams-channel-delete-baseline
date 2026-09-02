@@ -1,3 +1,7 @@
 # Local working files - intentionally not published to this repo.
 CLAUDE.md
 roadmap.md
+
+# Run reports. These contain tenant team names and object IDs and must never
+# be committed. Broad pattern so a custom -LogPath cannot slip past it.
+*.csv
