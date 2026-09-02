@@ -68,13 +68,36 @@ For an Azure Automation runbook or any other non-interactive host:
 .\Set-TeamsDeleteChannelBaseline.ps1 -AuthMode ManagedIdentity
 ```
 
-Uses the host's system-assigned managed identity — no secrets to store or rotate.
+Uses the host's system-assigned managed identity — no secrets to store or rotate. For a
+**user-assigned** identity, name it explicitly, or the host may bind the wrong principal:
+
+```powershell
+.\Set-TeamsDeleteChannelBaseline.ps1 -AuthMode ManagedIdentity -ManagedIdentityClientId <client-id>
+```
+
+In this mode the report is also written to the output stream, so it survives in the job
+record even when the host discards its working directory.
+
+### Large tenants
+
+`-UseBatch` reads team settings 20 at a time through the Graph `$batch` endpoint instead of
+one request per team, which is faster and less likely to be throttled on tenants with
+thousands of teams:
+
+```powershell
+.\Set-TeamsDeleteChannelBaseline.ps1 -WhatIf -UseBatch
+```
+
+It is off by default — the sequential path is simpler and is the one exercised on ordinary
+runs. Both paths produce the same report.
 
 ### Options
 
 | Parameter | Default | Description |
 |---|---|---|
 | `-AuthMode` | `Interactive` | `Interactive` or `ManagedIdentity`. |
+| `-ManagedIdentityClientId` | — | Client ID of a user-assigned managed identity. Omit for system-assigned. |
+| `-UseBatch` | off | Read team settings in batches of 20 via `$batch`. For large tenants. |
 | `-LogPath` | `.\Reports\TeamsChannelBaseline_<timestamp>.csv` | Where to write the CSV report. The parent folder is created if it does not exist. |
 | `-WhatIf` | — | Report only; makes no changes. |
 
@@ -140,6 +163,6 @@ because that work is genuinely still outstanding.
   script from the same place each time if you want the reports collected together. Reports
   are excluded from this repository by `.gitignore` — they contain team display names and
   object IDs.
-- **In an Azure Automation runbook the working directory is the job sandbox**, which is
-  discarded when the job ends, taking the report with it. Capture the console output, or
-  point `-LogPath` somewhere durable.
+- **In `ManagedIdentity` mode the report is also emitted to the output stream**, because an
+  unattended host such as an Azure Automation sandbox discards its working directory when
+  the job ends. The file alone would not survive there; the job record does.

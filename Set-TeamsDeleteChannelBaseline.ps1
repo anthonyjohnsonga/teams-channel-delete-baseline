@@ -50,6 +50,16 @@ param(
     [ValidateSet('Interactive', 'ManagedIdentity')]
     [string] $AuthMode = 'Interactive',
 
+    # Only meaningful with -AuthMode ManagedIdentity. Leave unset for a system-assigned
+    # identity; supply the identity's client ID for a user-assigned one.
+    [string] $ManagedIdentityClientId,
+
+    # Read team settings in batches of 20 through the Graph $batch endpoint instead of one
+    # request per team. Worth enabling on large tenants, where the per-team read is slow
+    # and more likely to be throttled. Off by default: the sequential path is simpler and
+    # is the one exercised on ordinary runs.
+    [switch] $UseBatch,
+
     # Reports land in a Reports folder under the working directory the script is run from.
     # Resolved to an absolute path here so the path echoed at the end is unambiguous.
     [string] $LogPath = (Join-Path `
@@ -67,7 +77,14 @@ switch ($AuthMode) {
         Connect-MgGraph -Scopes 'TeamSettings.ReadWrite.All', 'Group.Read.All' -NoWelcome
     }
     'ManagedIdentity' {
-        Connect-MgGraph -Identity -NoWelcome
+        # -Identity alone binds the system-assigned identity; a user-assigned one has to
+        # be named explicitly or the host picks the wrong principal.
+        if ($ManagedIdentityClientId) {
+            Connect-MgGraph -Identity -ClientId $ManagedIdentityClientId -NoWelcome
+        }
+        else {
+            Connect-MgGraph -Identity -NoWelcome
+        }
     }
 }
 
@@ -130,6 +147,77 @@ function Add-Result {
     })
 }
 
+# Reads team settings 20 at a time through the $batch endpoint. Returns a hashtable of
+# team id -> either the team object or an [int] HTTP status for the ones that failed, so
+# callers can classify failures the same way the sequential path does.
+#
+# A $batch call returns 200 even when individual requests inside it failed, so each
+# response has to be inspected on its own. Graph also does not guarantee response order,
+# hence matching on the request id rather than position.
+function Get-TeamSettingsBatch {
+    param([object[]] $Teams)
+
+    $lookup = @{}
+
+    for ($offset = 0; $offset -lt $Teams.Count; $offset += 20) {
+        $chunk = $Teams[$offset..([Math]::Min($offset + 19, $Teams.Count - 1))]
+
+        $payload = @{
+            requests = @($chunk | ForEach-Object {
+                @{ id = $_.Id; method = 'GET'; url = "/teams/$($_.Id)" }
+            })
+        }
+
+        try {
+            $response = Invoke-MgGraphRequest -Method POST -Uri 'v1.0/$batch' `
+                -Body ($payload | ConvertTo-Json -Depth 5) -ContentType 'application/json'
+        }
+        catch {
+            # The whole batch failed. Mark every team in it with the batch status so they
+            # are classified rather than silently dropped.
+            $status = Get-HttpStatus $_
+            foreach ($t in $chunk) { $lookup[$t.Id] = $(if ($status) { $status } else { -1 }) }
+            continue
+        }
+
+        foreach ($item in $response.responses) {
+            if ($item.status -ge 200 -and $item.status -lt 300) {
+                # $batch hands back raw JSON in camelCase, while Get-MgTeam returns a
+                # PascalCase SDK object. Normalise here so the remediation loop does not
+                # have to care which path produced the team - otherwise the camelCase body
+                # reads as "no settings" and every team looks broken.
+                $body = $item.body
+                $ms   = $body.memberSettings
+
+                $lookup[$item.id] = [pscustomobject]@{
+                    IsArchived     = [bool] $body.isArchived
+                    MemberSettings = if ($null -eq $ms) { $null } else {
+                        [pscustomobject]@{
+                            AllowCreateUpdateChannels         = $ms.allowCreateUpdateChannels
+                            AllowCreatePrivateChannels        = $ms.allowCreatePrivateChannels
+                            AllowDeleteChannels               = $ms.allowDeleteChannels
+                            AllowAddRemoveApps                = $ms.allowAddRemoveApps
+                            AllowCreateUpdateRemoveTabs       = $ms.allowCreateUpdateRemoveTabs
+                            AllowCreateUpdateRemoveConnectors = $ms.allowCreateUpdateRemoveConnectors
+                        }
+                    }
+                }
+            }
+            else {
+                $lookup[$item.id] = [int] $item.status
+            }
+        }
+
+        # Any team the response never mentioned - defensive, but better than a null read
+        # being mistaken for "no settings".
+        foreach ($t in $chunk) {
+            if (-not $lookup.ContainsKey($t.Id)) { $lookup[$t.Id] = -1 }
+        }
+    }
+
+    $lookup
+}
+
 # Graph surfaces the HTTP status in different places depending on which layer threw, so
 # probe the common shapes rather than assuming one. Returns null if none of them carry it.
 function Get-HttpStatus {
@@ -151,11 +239,21 @@ function Get-HttpStatus {
 function Add-Failure {
     param(
         [Parameter(Mandatory)] $Team,
-        [Parameter(Mandatory)] $ErrorRecord,
+        # Either an ErrorRecord from a thrown call, or an explicit status/message pair for
+        # the batch path, where individual failures arrive as data rather than exceptions.
+        $ErrorRecord,
+        [nullable[int]] $Status,
+        [string] $Message,
         [nullable[bool]] $Before = $null
     )
-    $status  = Get-HttpStatus $ErrorRecord
-    $message = $ErrorRecord.Exception.Message
+    if ($ErrorRecord) {
+        $status  = Get-HttpStatus $ErrorRecord
+        $message = $ErrorRecord.Exception.Message
+    }
+    else {
+        $status  = $Status
+        $message = $Message
+    }
 
     if ($status -eq 429 -or ($status -ge 500 -and $status -lt 600)) {
         $script:retryable++
@@ -183,15 +281,44 @@ Write-Host "Found $($teams.Count) team(s).`n" -ForegroundColor Gray
 
 $changed = 0; $already = 0; $skipped = 0; $retryable = 0; $failed = 0
 
+$batchLookup = $null
+if ($UseBatch -and $teams.Count -gt 0) {
+    Write-Host "Reading settings for $($teams.Count) team(s) in batches of 20..." -ForegroundColor Gray
+    $batchLookup = Get-TeamSettingsBatch -Teams @($teams)
+}
+
+$processed = 0
+$total     = @($teams).Count
+
 foreach ($team in $teams) {
 
-    try {
-        $current = Get-MgTeam -TeamId $team.Id -ErrorAction Stop
+    $processed++
+    Write-Progress -Activity 'Applying channel deletion baseline' `
+        -Status "$processed of $total - $($team.DisplayName)" `
+        -PercentComplete (($processed / [Math]::Max($total, 1)) * 100)
+
+    if ($null -ne $batchLookup) {
+        $entry = $batchLookup[$team.Id]
+
+        # An int here means that team's request inside the batch failed; the object form
+        # means it succeeded.
+        if ($entry -is [int]) {
+            $detail = if ($entry -gt 0) { "Batch read failed with HTTP $entry" }
+                      else { 'Batch read returned no response for this team' }
+            Add-Failure -Team $team -Status $(if ($entry -gt 0) { $entry } else { $null }) -Message $detail
+            continue
+        }
+        $current = $entry
     }
-    catch {
-        # Groups still provisioning commonly fail here.
-        Add-Failure -Team $team -ErrorRecord $_
-        continue
+    else {
+        try {
+            $current = Get-MgTeam -TeamId $team.Id -ErrorAction Stop
+        }
+        catch {
+            # Groups still provisioning commonly fail here.
+            Add-Failure -Team $team -ErrorRecord $_
+            continue
+        }
     }
 
     # No memberSettings means there is nothing to read and nothing safe to write back.
@@ -252,6 +379,8 @@ foreach ($team in $teams) {
     }
 }
 
+Write-Progress -Activity 'Applying channel deletion baseline' -Completed
+
 # --- Report ------------------------------------------------------------------
 
 Write-Host "`nRemediated: $changed | Already compliant: $already | Skipped (archived): $skipped | Retryable: $retryable | Errors: $failed" -ForegroundColor Green
@@ -272,6 +401,13 @@ if ($reportDir -and -not (Test-Path -LiteralPath $reportDir)) {
 # dry run. The report should write in both modes.
 $results | Export-Csv -Path $LogPath -NoTypeInformation -WhatIf:$false
 Write-Host "Report written to $LogPath" -ForegroundColor Cyan
+
+# Unattended hosts usually discard their working directory when the job ends - an Azure
+# Automation sandbox does - so the file on its own is not a durable artifact there. Emit
+# the same rows to the output stream, which is retained in the job record.
+if ($AuthMode -eq 'ManagedIdentity') {
+    $results | ConvertTo-Csv -NoTypeInformation | Write-Output
+}
 
 # Disconnect-MgGraph does not implement ShouldProcess - no -WhatIf to suppress.
 Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
