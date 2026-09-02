@@ -71,7 +71,32 @@ switch ($AuthMode) {
     }
 }
 
-Write-Host "Connected to tenant $((Get-MgContext).TenantId)" -ForegroundColor Cyan
+$tenantId = (Get-MgContext).TenantId
+$runStamp = Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK'
+
+Write-Host "Connected to tenant $tenantId" -ForegroundColor Cyan
+
+# Every row goes through here so the CSV cannot go ragged, and so the tenant and run
+# timestamp are stamped on each row rather than living only in the filename and the
+# console. Before is a nullable boolean - left null where the value could not be read,
+# so the column stays one type instead of mixing booleans with a magic string.
+function Add-Result {
+    param(
+        [Parameter(Mandatory)] $Team,
+        [Parameter(Mandatory)] [string] $Action,
+        [nullable[bool]] $Before = $null,
+        [string] $Detail = ''
+    )
+    $results.Add([pscustomobject]@{
+        RunTimestamp = $runStamp
+        TenantId     = $tenantId
+        Team         = $Team.DisplayName
+        TeamId       = $Team.Id
+        Before       = $Before
+        Action       = $Action
+        Detail       = $Detail
+    })
+}
 
 # --- Enumerate ---------------------------------------------------------------
 
@@ -85,7 +110,7 @@ Write-Host "Found $($teams.Count) team(s).`n" -ForegroundColor Gray
 
 # --- Remediate ---------------------------------------------------------------
 
-$changed = 0; $already = 0; $failed = 0
+$changed = 0; $already = 0; $skipped = 0; $failed = 0
 
 foreach ($team in $teams) {
 
@@ -93,13 +118,10 @@ foreach ($team in $teams) {
         $current = Get-MgTeam -TeamId $team.Id -ErrorAction Stop
     }
     catch {
-        # Archived teams and groups still provisioning commonly fail here.
+        # Groups still provisioning commonly fail here.
         Write-Warning "[SKIP] $($team.DisplayName): $($_.Exception.Message)"
         $failed++
-        $results.Add([pscustomobject]@{
-            Team = $team.DisplayName; TeamId = $team.Id
-            Before = 'unknown'; Action = 'Error'; Detail = $_.Exception.Message
-        })
+        Add-Result -Team $team -Action 'Error' -Detail $_.Exception.Message
         continue
     }
 
@@ -109,19 +131,24 @@ foreach ($team in $teams) {
     if ($null -eq $current.MemberSettings) {
         Write-Warning "[SKIP] $($team.DisplayName): team returned no memberSettings"
         $failed++
-        $results.Add([pscustomobject]@{
-            Team = $team.DisplayName; TeamId = $team.Id
-            Before = 'unknown'; Action = 'Error'; Detail = 'Team returned no memberSettings'
-        })
+        Add-Result -Team $team -Action 'Error' -Detail 'Team returned no memberSettings'
         continue
     }
 
     if ($current.MemberSettings.AllowDeleteChannels -eq $false) {
         $already++
-        $results.Add([pscustomobject]@{
-            Team = $team.DisplayName; TeamId = $team.Id
-            Before = $false; Action = 'AlreadyCompliant'; Detail = ''
-        })
+        Add-Result -Team $team -Action 'AlreadyCompliant' -Before $false
+        continue
+    }
+
+    # Archived teams reject writes with a permanent 403, so they are an expected skip
+    # rather than a failure. Checked after the compliance test above, so an archived team
+    # that is already compliant is reported as compliant - which it is - and only teams
+    # that would actually need a write land here.
+    if ($current.IsArchived) {
+        Write-Host "[SKIP] $($team.DisplayName): archived" -ForegroundColor DarkGray
+        $skipped++
+        Add-Result -Team $team -Action 'Skipped-Archived' -Before $true -Detail 'Team is archived'
         continue
     }
 
@@ -144,32 +171,23 @@ foreach ($team in $teams) {
             Update-MgTeam -TeamId $team.Id -MemberSettings $newSettings
             Write-Host "[FIXED] $($team.DisplayName)" -ForegroundColor Yellow
             $changed++
-            $results.Add([pscustomobject]@{
-                Team = $team.DisplayName; TeamId = $team.Id
-                Before = $true; Action = 'Remediated'; Detail = ''
-            })
+            Add-Result -Team $team -Action 'Remediated' -Before $true
         }
         catch {
             Write-Warning "[FAIL] $($team.DisplayName): $($_.Exception.Message)"
             $failed++
-            $results.Add([pscustomobject]@{
-                Team = $team.DisplayName; TeamId = $team.Id
-                Before = $true; Action = 'Error'; Detail = $_.Exception.Message
-            })
+            Add-Result -Team $team -Action 'Error' -Before $true -Detail $_.Exception.Message
         }
     }
     else {
         Write-Host "[WOULD FIX] $($team.DisplayName)" -ForegroundColor DarkYellow
-        $results.Add([pscustomobject]@{
-            Team = $team.DisplayName; TeamId = $team.Id
-            Before = $true; Action = 'WhatIf'; Detail = ''
-        })
+        Add-Result -Team $team -Action 'WhatIf' -Before $true
     }
 }
 
 # --- Report ------------------------------------------------------------------
 
-Write-Host "`nRemediated: $changed | Already compliant: $already | Errors: $failed" -ForegroundColor Green
+Write-Host "`nRemediated: $changed | Already compliant: $already | Skipped (archived): $skipped | Errors: $failed" -ForegroundColor Green
 
 # Create the report folder if it does not exist yet. New-Item supports ShouldProcess,
 # so it needs -WhatIf:$false for the same reason Export-Csv does - see below.

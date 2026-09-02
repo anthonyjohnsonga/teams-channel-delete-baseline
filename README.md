@@ -80,7 +80,7 @@ Uses the host's system-assigned managed identity — no secrets to store or rota
 A summary line on the console:
 
 ```
-Remediated: 12 | Already compliant: 84 | Errors: 2
+Remediated: 12 | Already compliant: 84 | Skipped (archived): 3 | Errors: 2
 ```
 
 And a CSV report saved to a `Reports` folder under the directory you run the script from —
@@ -88,11 +88,23 @@ created automatically if it does not exist — with one row per team:
 
 | Column | Description |
 |---|---|
+| `RunTimestamp` | When the run started, ISO 8601. Identical on every row. |
+| `TenantId` | Tenant the run was made against |
 | `Team` | Team display name |
 | `TeamId` | Group / team object ID |
-| `Before` | Value of `allowDeleteChannels` before the run |
-| `Action` | `Remediated`, `AlreadyCompliant`, `WhatIf`, or `Error` |
-| `Detail` | Error message, where applicable |
+| `Before` | Value of `allowDeleteChannels` before the run. Empty where it could not be read. |
+| `Action` | See below |
+| `Detail` | Error message or skip reason, where applicable |
+
+`Action` is one of:
+
+| Value | Meaning |
+|---|---|
+| `Remediated` | Was `true`, has been set to `false` |
+| `AlreadyCompliant` | Already `false`, left alone |
+| `Skipped-Archived` | Would need changing, but the team is archived |
+| `WhatIf` | Would be changed — dry run only, nothing was written |
+| `Error` | Could not be read or written; see `Detail` |
 
 The CSV is written in both dry-run and apply modes.
 
@@ -103,8 +115,10 @@ The CSV is written in both dry-run and apply modes.
 - **This sets a point-in-time baseline, not a permanent one.** No tenant-level policy pins
   `allowDeleteChannels`, so a team owner can re-enable it from the Teams client afterwards.
   Re-run the script to re-establish the baseline.
-- **Archived teams are expected to fail** and will appear in the CSV as `Error`. This is
-  normal and does not require action.
+- **Archived teams are skipped, not failed.** They reject writes permanently, so they are
+  reported as `Skipped-Archived` and counted separately from errors. An archived team that
+  is already compliant is reported as `AlreadyCompliant` — no change was needed either way.
+  To bring an archived team into line, unarchive it and re-run.
 - **The `Reports` folder is created under your current working directory**, so run the
   script from the same place each time if you want the reports collected together. Reports
   are excluded from this repository by `.gitignore` — they contain team display names and
