@@ -103,6 +103,19 @@ foreach ($team in $teams) {
         continue
     }
 
+    # No memberSettings means there is nothing to read and nothing safe to write back.
+    # Without this guard a null would fall through to the update below and be recorded
+    # as remediated.
+    if ($null -eq $current.MemberSettings) {
+        Write-Warning "[SKIP] $($team.DisplayName): team returned no memberSettings"
+        $failed++
+        $results.Add([pscustomobject]@{
+            Team = $team.DisplayName; TeamId = $team.Id
+            Before = 'unknown'; Action = 'Error'; Detail = 'Team returned no memberSettings'
+        })
+        continue
+    }
+
     if ($current.MemberSettings.AllowDeleteChannels -eq $false) {
         $already++
         $results.Add([pscustomobject]@{
@@ -112,9 +125,23 @@ foreach ($team in $teams) {
         continue
     }
 
+    # Send all six memberSettings back, not just the one being changed. Graph normally
+    # merges a partial complex type, but if it ever stopped doing so a partial PATCH
+    # would reset the other five to defaults on every team in the tenant, silently, and
+    # the report would still say Remediated. The full object is already in hand from the
+    # read above, so preserving the siblings explicitly costs nothing.
+    $newSettings = @{
+        allowCreateUpdateChannels         = $current.MemberSettings.AllowCreateUpdateChannels
+        allowCreatePrivateChannels        = $current.MemberSettings.AllowCreatePrivateChannels
+        allowDeleteChannels               = $false
+        allowAddRemoveApps                = $current.MemberSettings.AllowAddRemoveApps
+        allowCreateUpdateRemoveTabs       = $current.MemberSettings.AllowCreateUpdateRemoveTabs
+        allowCreateUpdateRemoveConnectors = $current.MemberSettings.AllowCreateUpdateRemoveConnectors
+    }
+
     if ($PSCmdlet.ShouldProcess($team.DisplayName, 'Set allowDeleteChannels = false')) {
         try {
-            Update-MgTeam -TeamId $team.Id -MemberSettings @{ allowDeleteChannels = $false }
+            Update-MgTeam -TeamId $team.Id -MemberSettings $newSettings
             Write-Host "[FIXED] $($team.DisplayName)" -ForegroundColor Yellow
             $changed++
             $results.Add([pscustomobject]@{
