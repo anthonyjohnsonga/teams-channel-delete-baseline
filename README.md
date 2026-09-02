@@ -80,7 +80,7 @@ Uses the host's system-assigned managed identity — no secrets to store or rota
 A summary line on the console:
 
 ```
-Remediated: 12 | Already compliant: 84 | Skipped (archived): 3 | Errors: 2
+Remediated: 12 | Already compliant: 84 | Skipped (archived): 3 | Retryable: 0 | Errors: 2
 ```
 
 And a CSV report saved to a `Reports` folder under the directory you run the script from —
@@ -94,6 +94,7 @@ created automatically if it does not exist — with one row per team:
 | `TeamId` | Group / team object ID |
 | `Before` | Value of `allowDeleteChannels` before the run. Empty where it could not be read. |
 | `Action` | See below |
+| `StatusCode` | HTTP status where the failure carried one. Empty otherwise. |
 | `Detail` | Error message or skip reason, where applicable |
 
 `Action` is one of:
@@ -104,7 +105,18 @@ created automatically if it does not exist — with one row per team:
 | `AlreadyCompliant` | Already `false`, left alone |
 | `Skipped-Archived` | Would need changing, but the team is archived |
 | `WhatIf` | Would be changed — dry run only, nothing was written |
-| `Error` | Could not be read or written; see `Detail` |
+| `Retryable` | Throttled (429) or a server error (5xx). Not changed; re-run picks it up. |
+| `Error` | Could not be read or written; see `StatusCode` and `Detail` |
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Every team was either remediated, already compliant, or an expected archived skip |
+| `1` | At least one team was left unremediated by an error or throttling |
+
+Archived skips do not cause a non-zero exit — they are expected. `Retryable` results do,
+because that work is genuinely still outstanding.
 
 The CSV is written in both dry-run and apply modes.
 

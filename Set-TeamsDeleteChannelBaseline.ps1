@@ -85,6 +85,7 @@ function Add-Result {
         [Parameter(Mandatory)] $Team,
         [Parameter(Mandatory)] [string] $Action,
         [nullable[bool]] $Before = $null,
+        [nullable[int]] $StatusCode = $null,
         [string] $Detail = ''
     )
     $results.Add([pscustomobject]@{
@@ -94,8 +95,48 @@ function Add-Result {
         TeamId       = $Team.Id
         Before       = $Before
         Action       = $Action
+        StatusCode   = $StatusCode
         Detail       = $Detail
     })
+}
+
+# Graph surfaces the HTTP status in different places depending on which layer threw, so
+# probe the common shapes rather than assuming one. Returns null if none of them carry it.
+function Get-HttpStatus {
+    param($ErrorRecord)
+    $ex = $ErrorRecord.Exception
+    $raw = if ($null -ne $ex.Response -and $null -ne $ex.Response.StatusCode) { $ex.Response.StatusCode }
+           elseif ($null -ne $ex.HttpStatus) { $ex.HttpStatus }
+           elseif ($null -ne $ex.StatusCode) { $ex.StatusCode }
+           else { $null }
+
+    if ($null -eq $raw) { return $null }
+    try { [int] $raw } catch { $null }
+}
+
+# A 429 or a 5xx means the team was not remediated but nothing is wrong with the team -
+# the SDK already retried and gave up, and a later re-run will pick it up. Filing those
+# as Error makes a transient blip indistinguishable from a genuinely broken team, so
+# they are labelled and counted separately.
+function Add-Failure {
+    param(
+        [Parameter(Mandatory)] $Team,
+        [Parameter(Mandatory)] $ErrorRecord,
+        [nullable[bool]] $Before = $null
+    )
+    $status  = Get-HttpStatus $ErrorRecord
+    $message = $ErrorRecord.Exception.Message
+
+    if ($status -eq 429 -or ($status -ge 500 -and $status -lt 600)) {
+        $script:retryable++
+        Write-Warning "[RETRY] $($Team.DisplayName) (HTTP $status): $message"
+        Add-Result -Team $Team -Action 'Retryable' -Before $Before -StatusCode $status -Detail $message
+    }
+    else {
+        $script:failed++
+        Write-Warning "[FAIL] $($Team.DisplayName): $message"
+        Add-Result -Team $Team -Action 'Error' -Before $Before -StatusCode $status -Detail $message
+    }
 }
 
 # --- Enumerate ---------------------------------------------------------------
@@ -110,7 +151,7 @@ Write-Host "Found $($teams.Count) team(s).`n" -ForegroundColor Gray
 
 # --- Remediate ---------------------------------------------------------------
 
-$changed = 0; $already = 0; $skipped = 0; $failed = 0
+$changed = 0; $already = 0; $skipped = 0; $retryable = 0; $failed = 0
 
 foreach ($team in $teams) {
 
@@ -119,9 +160,7 @@ foreach ($team in $teams) {
     }
     catch {
         # Groups still provisioning commonly fail here.
-        Write-Warning "[SKIP] $($team.DisplayName): $($_.Exception.Message)"
-        $failed++
-        Add-Result -Team $team -Action 'Error' -Detail $_.Exception.Message
+        Add-Failure -Team $team -ErrorRecord $_
         continue
     }
 
@@ -174,9 +213,7 @@ foreach ($team in $teams) {
             Add-Result -Team $team -Action 'Remediated' -Before $true
         }
         catch {
-            Write-Warning "[FAIL] $($team.DisplayName): $($_.Exception.Message)"
-            $failed++
-            Add-Result -Team $team -Action 'Error' -Before $true -Detail $_.Exception.Message
+            Add-Failure -Team $team -ErrorRecord $_ -Before $true
         }
     }
     else {
@@ -187,7 +224,11 @@ foreach ($team in $teams) {
 
 # --- Report ------------------------------------------------------------------
 
-Write-Host "`nRemediated: $changed | Already compliant: $already | Skipped (archived): $skipped | Errors: $failed" -ForegroundColor Green
+Write-Host "`nRemediated: $changed | Already compliant: $already | Skipped (archived): $skipped | Retryable: $retryable | Errors: $failed" -ForegroundColor Green
+
+if ($retryable -gt 0) {
+    Write-Host "$retryable team(s) hit throttling or a server error and were not changed. Re-run to pick them up." -ForegroundColor Yellow
+}
 
 # Create the report folder if it does not exist yet. New-Item supports ShouldProcess,
 # so it needs -WhatIf:$false for the same reason Export-Csv does - see below.
@@ -204,3 +245,9 @@ Write-Host "Report written to $LogPath" -ForegroundColor Cyan
 
 # Disconnect-MgGraph does not implement ShouldProcess - no -WhatIf to suppress.
 Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+
+# Exit non-zero if any team was left unremediated by a problem, so an unattended caller
+# does not read a completed job as a clean one. Archived skips are expected and do not
+# count; retryable failures do, because that work is genuinely still outstanding.
+if ($failed -gt 0 -or $retryable -gt 0) { exit 1 }
+exit 0
