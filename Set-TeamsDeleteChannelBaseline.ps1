@@ -71,10 +71,40 @@ switch ($AuthMode) {
     }
 }
 
-$tenantId = (Get-MgContext).TenantId
+$context  = Get-MgContext
+$tenantId = $context.TenantId
 $runStamp = Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK'
 
 Write-Host "Connected to tenant $tenantId" -ForegroundColor Cyan
+
+# Pre-flight the permissions. Connect-MgGraph succeeds even when admin consent was never
+# granted, and without this the first sign of trouble is a 403 on every team in turn.
+# Each requirement lists the scopes that satisfy it, so holding a stronger scope than the
+# minimum does not trip the check.
+$requiredScopes = [ordered]@{
+    'Group.Read.All'             = @('Group.Read.All', 'Group.ReadWrite.All',
+                                     'Directory.Read.All', 'Directory.ReadWrite.All')
+    'TeamSettings.ReadWrite.All' = @('TeamSettings.ReadWrite.All')
+}
+
+if (-not $context.Scopes) {
+    # App-only tokens do not always surface their roles here. Warn rather than block:
+    # refusing to run on a check we cannot perform would be worse than a clear 403.
+    Write-Warning 'Could not read granted permissions from the Graph context - skipping the pre-flight check.'
+}
+else {
+    $missing = foreach ($requirement in $requiredScopes.Keys) {
+        if (-not ($requiredScopes[$requirement] | Where-Object { $_ -in $context.Scopes })) {
+            $requirement
+        }
+    }
+
+    if ($missing) {
+        throw ("Missing required Graph permission(s): {0}. " -f ($missing -join ', ')) +
+              'The sign-in succeeded but these were not consented, so every team would fail ' +
+              'with a 403. An administrator needs to grant them before this script can run.'
+    }
+}
 
 # Every row goes through here so the CSV cannot go ragged, and so the tenant and run
 # timestamp are stamped on each row rather than living only in the filename and the

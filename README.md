@@ -28,6 +28,11 @@ Install-Module Microsoft.Graph.Authentication, Microsoft.Graph.Groups, Microsoft
 | Mode | What you need |
 |---|---|
 | `Interactive` | Sign in as **Teams Administrator** or **Global Administrator**. The script requests the `TeamSettings.ReadWrite.All` and `Group.Read.All` delegated scopes at sign-in. |
+
+The script checks these permissions immediately after sign-in and stops with a clear
+message if they were not consented, rather than failing with a 403 on every team in turn.
+Holding a stronger scope than the minimum (for example `Group.ReadWrite.All` in place of
+`Group.Read.All`) satisfies the check.
 | `ManagedIdentity` | Grant the managed identity the `TeamSettings.ReadWrite.All` and `Group.Read.All` **application** roles. These must be assigned through Graph — the Azure portal UI cannot assign them. |
 
 ---
