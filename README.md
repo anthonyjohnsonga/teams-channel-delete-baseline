@@ -78,26 +78,12 @@ Uses the host's system-assigned managed identity — no secrets to store or rota
 In this mode the report is also written to the output stream, so it survives in the job
 record even when the host discards its working directory.
 
-### Large tenants
-
-`-UseBatch` reads team settings 20 at a time through the Graph `$batch` endpoint instead of
-one request per team, which is faster and less likely to be throttled on tenants with
-thousands of teams:
-
-```powershell
-.\Set-TeamsDeleteChannelBaseline.ps1 -WhatIf -UseBatch
-```
-
-It is off by default — the sequential path is simpler and is the one exercised on ordinary
-runs. Both paths produce the same report.
-
 ### Options
 
 | Parameter | Default | Description |
 |---|---|---|
 | `-AuthMode` | `Interactive` | `Interactive` or `ManagedIdentity`. |
 | `-ManagedIdentityClientId` | — | Client ID of a user-assigned managed identity. Omit for system-assigned. |
-| `-UseBatch` | off | Read team settings in batches of 20 via `$batch`. For large tenants. |
 | `-LogPath` | `.\Reports\TeamsChannelBaseline_<timestamp>.csv` | Where to write the CSV report. The parent folder is created if it does not exist. |
 | `-WhatIf` | — | Report only; makes no changes. |
 
